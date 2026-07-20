@@ -1,1 +1,1 @@
-from .spectral import multitaper_spectrogram,spectrogram,plot_spectrogram,plot_spectrum
+from .spectral import multitaper_spectrogram,spectrogram,compute_eigcoeffs,plot_spectrogram,plot_spectrum

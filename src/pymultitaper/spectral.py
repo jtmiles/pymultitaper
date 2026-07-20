@@ -27,7 +27,8 @@ def _get_1d_window(window_shape,n_winlen):
     win_arr = win_arr[:,None]
     return win_arr,weights
 
-def _spectrogram(data:NDArray,fs:float,time_step:float,win:NDArray,weights:NDArray,freq_range:list,detrend:Literal["constant","linear","off"],nfft:Optional[int]=None,db_scale:bool=True,p_ref:float=2e-5,boundary_pad:bool=False) -> Tuple[NDArray,NDArray,NDArray]:
+
+def compute_eigcoeffs(data:NDArray,fs:float,time_step:float,win:NDArray,weights:NDArray,freq_range:list,detrend:Literal["constant","linear","off"],nfft:Optional[int]=None) -> Tuple[NDArray,NDArray,NDArray]:
     """
     Core implementation of spectrogram (PSD) calculation.
 
@@ -42,16 +43,9 @@ def _spectrogram(data:NDArray,fs:float,time_step:float,win:NDArray,weights:NDArr
         freq_range (list): [fmin,fmax] Frequency range to keep in the spectrogram, if `None`, [0,fs/2] is used
         detrend (str): {'constant','linear','off'} Detrend method
         nfft (int): The number of FFT points, if `None`, will be set to the smallest power of 2 that is larger than the window length
-        db_scale (bool): Whether to scale the PSD in dB
-        p_ref (float): When db_scale is True, the reference pressure level in Pa
-        boundary_pad (bool, optional): Whether to pad the data with zeros at the beginning and end. This is useful when the data is not evenly divisible by the window length and time step. By default `False`.
-
-            - If `True`, the data will be padded with zeros at the beginning and end, so that the first frame is centered on the first sample of data, and all samples are included in (at least) one frame.
-            - If `False`, the first frame is centered at `window_length/2` seconds after the first sample, and samples after `n_frames*time_step+window_length` seconds are ignored.
 
     Returns:
         freqs (n_freqs,): Frequency points of the spectrogram
-        times (n_frames,): Time points of each frame
         psd (n_freqs,n_frames): PSD spectrogram
     """
     # Prepare arguments
@@ -85,10 +79,77 @@ def _spectrogram(data:NDArray,fs:float,time_step:float,win:NDArray,weights:NDArr
     # zero-padding is automatically done in `fft.rfft`
     fft_data = fft.rfft(wined_frames,n=nfft,axis=1)
 
-    # Step 5: Calculate frequencies and time points
-    raw_freqs = fft.rfftfreq(nfft,1/fs)
-    freqs_idx = np.where((raw_freqs >= fmin) & (raw_freqs <= fmax))[0]
-    freqs = raw_freqs[freqs_idx]
+    return freqs, fft_data
+
+def _spectrogram(data:NDArray,fs:float,time_step:float,win:NDArray,weights:NDArray,freq_range:list,detrend:Literal["constant","linear","off"],nfft:Optional[int]=None,db_scale:bool=True,p_ref:float=2e-5,boundary_pad:bool=False) -> Tuple[NDArray,NDArray,NDArray]:
+    """
+    Core implementation of spectrogram (PSD) calculation.
+
+    The spectrogram is calculated when multiple window array and their weights are given. The result is the weighted sum of the PSDs of each windowed frame (when the weights sum to 1, it is the weighted average PSD).
+
+    Args:
+        data (NDArray): (n_samples,)
+        fs (float): Sampling frequency
+        time_step (float): Time step between frames in seconds
+        win (NDArray): (n_winlen,n_wins) Window arrays from different window functions
+        weights (NDArray): (n_wins,) Weights for each window array
+        freq_range (list): [fmin,fmax] Frequency range to keep in the spectrogram, if `None`, [0,fs/2] is used
+        detrend (str): {'constant','linear','off'} Detrend method
+        nfft (int): The number of FFT points, if `None`, will be set to the smallest power of 2 that is larger than the window length
+        db_scale (bool): Whether to scale the PSD in dB
+        p_ref (float): When db_scale is True, the reference pressure level in Pa
+        boundary_pad (bool, optional): Whether to pad the data with zeros at the beginning and end. This is useful when the data is not evenly divisible by the window length and time step. By default `False`.
+
+            - If `True`, the data will be padded with zeros at the beginning and end, so that the first frame is centered on the first sample of data, and all samples are included in (at least) one frame.
+            - If `False`, the first frame is centered at `window_length/2` seconds after the first sample, and samples after `n_frames*time_step+window_length` seconds are ignored.
+
+    Returns:
+        freqs (n_freqs,): Frequency points of the spectrogram
+        times (n_frames,): Time points of each frame
+        psd (n_freqs,n_frames): PSD spectrogram
+
+    *** Modifying to return the complex eigencoefficients for multitaper cross-spectra computation
+        JTM: 07/2026 (mtcoh branch in my repo)
+        
+    """
+##    # Prepare arguments
+##    # win: (n_winlen,n_wins)
+##    n_winlen = win.shape[0]
+##    n_tstep = int(time_step*fs)
+##    if freq_range is None:
+##        freq_range = [0,fs/2]
+##    fmin,fmax = freq_range
+##
+##    if boundary_pad:
+##        n_pad = int(n_winlen/2)+1
+##        data = np.pad(data,(n_pad,n_pad),'constant',constant_values=0)
+##
+##    # Step 1: Frame the data
+##    # (n_frames,n_winlen)
+##    frames = np.lib.stride_tricks.sliding_window_view(data,n_winlen,writeable=False)[::n_tstep]
+##    n_frames = frames.shape[0]
+##
+##    # Step 2: Detrend (if necessary)
+##    if detrend != "off":
+##        frames = signal.detrend(frames,axis=1,type=detrend)
+##    
+##    # Step 3: Windowing
+##    # (n_frames,n_winlen,n_wins) = (n_frames,n_winlen,1) * (1,n_winlen,n_wins)
+##    wined_frames = frames[...,None] * win[None,...]
+##
+##    # Step 4: FFT
+##    nfft = 2**int(np.ceil(np.log2(n_winlen))) if nfft is None else nfft
+##    # (n_frames,nfft,n_wins)
+##    # zero-padding is automatically done in `fft.rfft`
+##    fft_data = fft.rfft(wined_frames,n=nfft,axis=1)
+##
+##    # Step 5: Calculate frequencies and time points
+##    raw_freqs = fft.rfftfreq(nfft,1/fs)
+##    freqs_idx = np.where((raw_freqs >= fmin) & (raw_freqs <= fmax))[0]
+##    freqs = raw_freqs[freqs_idx]
+
+    freqs, times = compute_eigcoeffs(data:NDArray,fs:float,time_step:float,win:NDArray,weights:NDArray,freq_range:list,detrend:Literal["constant","linear","off"],nfft:Optional[int]=None)
+
     if boundary_pad:
         times = np.arange(0,n_frames) * time_step
     else:

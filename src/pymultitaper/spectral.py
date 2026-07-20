@@ -148,7 +148,7 @@ def _spectrogram(data:NDArray,fs:float,time_step:float,win:NDArray,weights:NDArr
 ##    freqs_idx = np.where((raw_freqs >= fmin) & (raw_freqs <= fmax))[0]
 ##    freqs = raw_freqs[freqs_idx]
 
-    freqs, times = compute_eigcoeffs(data:NDArray,fs:float,time_step:float,win:NDArray,weights:NDArray,freq_range:list,detrend:Literal["constant","linear","off"],nfft:Optional[int]=None)
+    freqs, times = compute_eigcoeffs(data,fs,time_step,win,weights,freq_range,detrend,nfft=nfft)
 
     if boundary_pad:
         times = np.arange(0,n_frames) * time_step

@@ -76,7 +76,14 @@ def compute_eigcoeffs(data:NDArray,fs:float,time_step:float,win:NDArray,weights:
     # zero-padding is automatically done in `fft.rfft`
     fft_data = fft.rfft(wined_frames,n=nfft,axis=1)
 
-    return fft_data, n_frames
+    if freq_range is None:
+        freq_range = [0,fs/2]
+    fmin,fmax = freq_range
+    raw_freqs = fft.rfftfreq(nfft,1/fs)
+    freqs_idx = np.where((raw_freqs >= fmin) & (raw_freqs <= fmax))[0]
+    freqs = raw_freqs[freqs_idx]
+
+    return fft_data[:,freqs_idx,:], n_frames, freqs
 
 def _spectrogram(data:NDArray,fs:float,time_step:float,win:NDArray,weights:NDArray,freq_range:list,detrend:Literal["constant","linear","off"],nfft:Optional[int]=None,db_scale:bool=True,p_ref:float=2e-5,boundary_pad:bool=False) -> Tuple[NDArray,NDArray,NDArray]:
     """
@@ -113,23 +120,17 @@ def _spectrogram(data:NDArray,fs:float,time_step:float,win:NDArray,weights:NDArr
     # Step 5: Calculate frequencies and time points
     n_winlen = win.shape[0]
     nfft = 2**int(np.ceil(np.log2(n_winlen))) if nfft is None else nfft
+
     if freq_range is None:
         freq_range = [0,fs/2]
     fmin,fmax = freq_range
-    raw_freqs = fft.rfftfreq(nfft,1/fs)
-    freqs_idx = np.where((raw_freqs >= fmin) & (raw_freqs <= fmax))[0]
-    freqs = raw_freqs[freqs_idx]
     
-    
-    fft_data, n_frames = compute_eigcoeffs(data,fs,time_step,win,weights,freq_range,detrend,nfft=nfft)
-
+    fft_data, n_frames, freqs = compute_eigcoeffs(data,fs,time_step,win,weights,freq_range,detrend,nfft=nfft)
     
     if boundary_pad:
         times = np.arange(0,n_frames) * time_step
     else:
         times = np.arange(0,n_frames) * time_step + n_winlen/2/fs
-    # Note: we filter out the frequencies with frequency range, therefore implicitly filter out the negative frequencies
-    fft_data = fft_data[:,freqs_idx,:]
     
     # Step 6: Calculate PSD and average over window types
     # (n_wins,) We need to scale the PSD by the sum of the square of the window and fs
@@ -149,7 +150,9 @@ def _spectrogram(data:NDArray,fs:float,time_step:float,win:NDArray,weights:NDArr
     psd_data = psd_data.T
     return freqs,times,psd_data
 
-def multitaper_cohgram(dataX:NDArray,dataY:NDArray,fs:float,time_step:float,window_length:Optional[float]=None,NW:float=4.0,n_tapers:Optional[int]=None,freq_range:Optional[list]=None,weight_type:Literal["unity","eig"]="unity",detrend:Literal["constant","linear","off"]="constant",nfft:Optional[int]=None,boundary_pad:bool=False)-> Tuple[NDArray,NDArray,NDArray]:
+def multitaper_cohgram(dataX:NDArray,dataY:NDArray,fs:float,time_step:float,window_length:Optional[float]=None,
+                       NW:float=4.0,n_tapers:Optional[int]=None,freq_range:Optional[list]=None,weight_type:Literal["unity","eig"]="unity",
+                       detrend:Literal["constant","linear","off"]="constant",nfft:Optional[int]=None,boundary_pad:Optional[bool]=False,ret_spect:Optional[bool]=False)-> Tuple[NDArray,NDArray,NDArray]:
     """
     Compute the multitaper PSD of the input data.
 
@@ -170,46 +173,40 @@ def multitaper_cohgram(dataX:NDArray,dataY:NDArray,fs:float,time_step:float,wind
 
             - If `True`, the data will be padded with zeros at the beginning and end, so that the first frame is centered on the first sample of data, and all samples are included in (at least) one frame.
             - If `False`, the first frame is centered at `window_length/2` seconds after the first sample, and samples after `n_frames*time_step+window_length` seconds are ignored.
-    
+
+        ret_spect (bool, optional): Whether to return each individual autospectrum and their cross spectrum, separately, for doing additional calculations
+
+            - If `True`, returns Sxx, Syy, and Sxy
+            - If `False`, returns coh
     Notes:
-        The value of 2W is the regularization bandwidth. Typically, we choose W to be a small multiple of the fundamental frequency 1/(N*dt) (where N is the number of samples in the data), i.e. W=i/(N*dt). The value of the parameter `NW` here is in fact the value of i (when dt is seen as 1). There's a trade-off between frequency resolution and variance reduction: A larger `NW` will reduce the variance of the PSD estimate, but also reduce the frequency resolution. 
+        The value of 2W is the regularization bandwidth. Typically, we choose W to be a small multiple of the fundamental frequency 1/(N*dt) (where N is the number of samples in the data),
+        i.e. W=i/(N*dt). The value of the parameter `NW` here is in fact the value of i (when dt is seen as 1).
+        There's a trade-off between frequency resolution and variance reduction: A larger `NW` will reduce the variance of the PSD estimate, but also reduce the frequency resolution. 
 
     Returns:
         freqs (NDArray): (n_freqs,) Frequency points of the spectrogram
         times (NDArray): (n_frames,) Time points of each frame
-        psd (NDArray): (n_freqs,n_frames) PSD spectrogram
+        coh (NDArray): (n_freqs,n_frames) multitaper coherence spectrum
     
     Examples:
         >>> freqs,times,coh = multitaper_spectrogram(dataX, dataY,fs,time_step=0.125,window_length=1,NW=4)
     """
+        
     if n_tapers is None:
         # Note: NW may be a float number
         n_tapers = np.floor(2*NW-1).astype(int)
     window_length = time_step if window_length is None else window_length
     n_winlen = int(window_length*fs)
     tapers,weights = _get_dpss_windows(n_winlen,NW,n_tapers,weight_type)
-
+    scale = (1 / (fs * np.sum(tapers**2, axis=0))) * weights
+    
     nfft = 2**int(np.ceil(np.log2(n_winlen))) if nfft is None else nfft
     
-    X,n_frames = compute_eigcoeffs(dataX,fs,time_step,tapers,weights,freq_range,detrend,nfft=nfft,boundary_pad=boundary_pad)
-    Y,_ = compute_eigcoeffs(dataY,fs,time_step,tapers,weights,freq_range,detrend,nfft=nfft,boundary_pad=boundary_pad)
+    X,n_frames,freqs = compute_eigcoeffs(dataX,fs,time_step,tapers,weights,freq_range,detrend,nfft=nfft,boundary_pad=boundary_pad)
+    Y,_,_ = compute_eigcoeffs(dataY,fs,time_step,tapers,weights,freq_range,detrend,nfft=nfft,boundary_pad=boundary_pad)
 
-    if freq_range is None:
-        freq_range = [0,fs/2]
-    fmin,fmax = freq_range
-    raw_freqs = fft.rfftfreq(nfft,1/fs)
-    freqs_idx = np.where((raw_freqs >= fmin) & (raw_freqs <= fmax))[0]
-    freqs = raw_freqs[freqs_idx]
-    
-    X = X[:, freqs_idx, :]
-    Y = Y[:, freqs_idx, :]
-
-    scale = (1 / (fs * np.sum(tapers**2, axis=0))) * weights
-
-    
     # Auto-spectra
     Sxx = np.sum(scale[None, None, :] * np.abs(X)**2, axis=-1)
-
     Syy = np.sum(scale[None, None, :] * np.abs(Y)**2,axis=-1)
 
     # Cross-spectrum
@@ -218,16 +215,16 @@ def multitaper_cohgram(dataX:NDArray,dataY:NDArray,fs:float,time_step:float,wind
     # Magnitude-squared coherence
     coh = np.abs(Sxy)**2 / (Sxx * Syy)
 
-    
-
     if boundary_pad:
         times = np.arange(0,n_frames) * time_step
     else:
         times = np.arange(0,n_frames) * time_step + n_winlen/2/fs
     
-    return freqs, times, coh
-
-
+    if ret_spect:
+        return freqs, times, Sxx, Syy, Sxy
+    else:
+        return freqs, times, coh
+    
     
 
 def multitaper_spectrogram(data:NDArray,fs:float,time_step:float,window_length:Optional[float]=None,NW:float=4.0,n_tapers:Optional[int]=None,freq_range:Optional[list]=None,weight_type:Literal["unity","eig"]="unity",detrend:Literal["constant","linear","off"]="constant",nfft:Optional[int]=None,db_scale:bool=True,p_ref:float=2e-5,boundary_pad:bool=False)-> Tuple[NDArray,NDArray,NDArray]:
